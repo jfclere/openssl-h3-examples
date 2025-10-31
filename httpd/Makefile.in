@@ -1,0 +1,19 @@
+APACHE_BASE = @APACHE_BASE@
+top_builddir = @APACHE_BUILDDIR@
+# For .deps.
+builddir = @CLUSTER_BASE@
+
+include $(top_builddir)/build/rules.mk
+SH_COMPILE = $(LIBTOOL) --mode=compile $(BASE_CC) -I../include -prefer-pic -c $< && touch $@
+
+all: mod_h3.so
+
+mod_h3.so: mod_h3.la
+	$(top_builddir)/build/instdso.sh SH_LIBTOOL='$(LIBTOOL)' mod_h3.la `pwd`
+
+mod_h3.la: mod_h3.slo
+	$(SH_LINK) -rpath $(libexecdir) -module -avoid-version mod_h3.lo
+
+clean:
+	rm -f *.o *.lo *.slo *.so
+	rm -rf .libs
