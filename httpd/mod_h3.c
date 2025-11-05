@@ -36,6 +36,9 @@
 static ap_filter_rec_t *h3_net_out_filter_handle;
 static ap_filter_rec_t *h3_net_in_filter_handle;
 static ap_filter_rec_t *h3_proto_out_filter_handle;
+static ap_filter_rec_t *h3_proto_in_filter_handle;
+
+static apr_socket_t *dummy_socket;
 
 static int h3_post_config(apr_pool_t *p, apr_pool_t *plog, apr_pool_t *ptemp, server_rec *s)
 {
@@ -47,22 +50,23 @@ static int h3_post_config(apr_pool_t *p, apr_pool_t *plog, apr_pool_t *ptemp, se
     }
 
     ap_log_error(APLOG_MARK, APLOG_ERR, 0, s,
-                         "JFC: %d", getpid());
+                         "h3_post_config: %d", getpid());
     return OK;
 }
 
 static int h3_hook_process_connection(conn_rec* c)
 {
     request_rec *r = NULL;
+    
     ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, c, "h3_hook_process_connection");
     r = ap_create_request(c);
     ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, c, "h3_hook_process_connection after ap_create_request()");
 
     /* populate r with the data we have. */
-    r->uri             = "/";
+    r->uri             = "/index.html"; /* "/" Will create a sub-request switch will cause us troubles for the moment */
     r->method = "GET";
     r->method_number = M_GET;
-    r->header_only = 0;
+    r->header_only = 1;
     r->protocol = "HTTP/1.1";
     r->proto_num = HTTP_VERSION(1, 1);
     r->hostname = NULL;
@@ -73,8 +77,12 @@ static int h3_hook_process_connection(conn_rec* c)
     apr_table_setn(r->headers_in, "Accept", "*/*"); 
 
     /* Add the filter for the response here */
-    ap_add_output_filter_handle(h3_proto_out_filter_handle, NULL, r, r->connection);
+    // ap_add_output_filter_handle(h3_proto_out_filter_handle, NULL, r, r->connection);
+    // ap_add_input_filter_handle(h3_proto_in_filter_handle, NULL, r, r->connection);
+    // ap_add_input_filter_handle(h3_net_in_filter_handle, NULL, NULL, c);
+    // ap_add_output_filter_handle(h3_net_out_filter_handle, NULL, NULL, c);
 
+    ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, c, "h3_hook_process_connection before ap_process_request()");
     ap_process_request(r);
     ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, c, "h3_hook_process_connection after ap_process_request()");
     return OK;
@@ -83,8 +91,6 @@ static int h3_hook_process_connection(conn_rec* c)
 static int h3_hook_pre_connection(conn_rec *c, void *csd)
 {
     ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, c, "h3_hook_pre_connection");
-    ap_add_input_filter_handle(h3_net_in_filter_handle, NULL, NULL, c);
-    ap_add_output_filter_handle(h3_net_out_filter_handle, NULL, NULL, c);
     return OK;
 }
 static int h3_hook_post_read_request(request_rec *r)
@@ -95,7 +101,6 @@ static int h3_hook_post_read_request(request_rec *r)
 static void h3_hook_pre_read_request(request_rec *r, conn_rec *c)
 {
     ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "h3_hook_ap_hook_pre_read_request");
-    ap_add_output_filter_handle(h3_proto_out_filter_handle, NULL, r, r->connection);
 }
 static int h3_hook_fixups(request_rec *r)
 {
@@ -105,15 +110,59 @@ static int h3_hook_fixups(request_rec *r)
 
 static apr_status_t h3_filter_out(ap_filter_t* f, apr_bucket_brigade* bb)
 {
-    int rv;
+    apr_bucket *b;
+    apr_status_t rv;
     char buff[2048];
     apr_size_t bufsiz = sizeof(buff);
 
     ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, f->c, "h3_filter_out");
+    for (b = APR_BRIGADE_FIRST(bb);
+         b != APR_BRIGADE_SENTINEL(bb);
+         b = APR_BUCKET_NEXT(b)) {
+        if (APR_BUCKET_IS_METADATA(b)) {
+            ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, f->c, "h3_filter_out APR_BUCKET_IS_METADATA");
+        }
+        if (APR_BUCKET_IS_FLUSH(b)) {
+            ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, f->c, "h3_filter_out APR_BUCKET_IS_FLUSH");
+        }
+        if (APR_BUCKET_IS_EOS(b)) {
+            ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, f->c, "h3_filter_out APR_BUCKET_IS_EOS");
+        }
+        if (AP_BUCKET_IS_ERROR(b)) {
+            ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, f->c, "h3_filter_out AP_BUCKET_IS_ERROR");
+        }
+        if (AP_BUCKET_IS_EOC(b)) {
+            ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, f->c, "h3_filter_out AP_BUCKET_IS_EOC");
+        }
+        if (APR_BUCKET_IS_FILE(b)) {
+            ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, f->c, "h3_filter_out APR_BUCKET_IS_FILE");
+        }
+        if (AP_BUCKET_IS_HEADERS(b)) {
+            ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, f->c, "h3_filter_out AP_BUCKET_IS_HEADERS");
+        }
+        if (APR_BUCKET_IS_FLUSH(b)) {
+            ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, f->c, "h3_filter_out APR_BUCKET_IS_FLUSH");
+        }
+        if (APR_BUCKET_IS_IMMORTAL(b)) {
+            ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, f->c, "h3_filter_out APR_BUCKET_IS_IMMORTAL");
+        }
+        if (AP_BUCKET_IS_EOR(b)) {
+            ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, f->c, "h3_filter_out AP_BUCKET_IS_EOR");
+        }
+        if (AP_BUCKET_IS_RESPONSE(b)) {
+            ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, f->c, "h3_filter_out AP_BUCKET_IS_RESPONSE");
+        } else {
+            ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, f->c, "h3_filter_out NOT AP_BUCKET_IS_RESPONSE");
+        }
+    }
+
     rv = apr_brigade_flatten(bb, buff, &bufsiz);
     ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, f->c, "h3_filter_out: read %d", bufsiz);
     if (bufsiz != 0) {
         ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, f->c, "h3_filter_out: read %.*s", bufsiz, buff);
+    } else {
+        /* Why I am here??? */
+        // abort();
     }
     return rv;
 }
@@ -127,11 +176,34 @@ static int print_table_entry(void *rec, const char *key, const char *value)
 static apr_status_t h3_filter_out_proto(ap_filter_t* f, apr_bucket_brigade* bb)
 {
     apr_bucket *b;
-    ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, f->c, "h3_filter_out_proto");
+    apr_status_t rv;
+    ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, f->c, "h3_filter_out_proto %d", f->r->status);
     
     for (b = APR_BRIGADE_FIRST(bb);
          b != APR_BRIGADE_SENTINEL(bb);
          b = APR_BUCKET_NEXT(b)) {
+        if (APR_BUCKET_IS_METADATA(b)) {
+            ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, f->c, "h3_filter_out_proto APR_BUCKET_IS_METADATA");
+        }
+        if (APR_BUCKET_IS_FLUSH(b)) {
+            ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, f->c, "h3_filter_out_proto APR_BUCKET_IS_FLUSH");
+        }
+        if (APR_BUCKET_IS_EOS(b)) {
+            ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, f->c, "h3_filter_out_proto APR_BUCKET_IS_EOS");
+        }
+        if (AP_BUCKET_IS_ERROR(b)) {
+            ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, f->c, "h3_filter_out_proto AP_BUCKET_IS_ERROR");
+        }
+        if (AP_BUCKET_IS_EOC(b)) {
+            ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, f->c, "h3_filter_out_proto AP_BUCKET_IS_EOC");
+        }
+        if (APR_BUCKET_IS_FILE(b)) {
+            ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, f->c, "h3_filter_out_proto APR_BUCKET_IS_FILE");
+            /* we need to read the file and send it */
+        }
+        if (AP_BUCKET_IS_HEADERS(b)) {
+            ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, f->c, "h3_filter_out_proto AP_BUCKET_IS_HEADERS");
+        }
         if (AP_BUCKET_IS_RESPONSE(b)) {
             ap_bucket_response *resp = b->data;
             ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, f->c, "h3_filter_out_proto AP_BUCKET_IS_RESPONSE");
@@ -145,9 +217,44 @@ static apr_status_t h3_filter_out_proto(ap_filter_t* f, apr_bucket_brigade* bb)
             if (resp->notes != NULL) {
                 apr_table_do(print_table_entry, (void *) f->c, resp->notes, NULL);
             }
-        } 
+        } else {
+            ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, f->c, "h3_filter_out_proto NOT AP_BUCKET_IS_RESPONSE");
+        }
     }
-    return ap_pass_brigade(f->next, bb);
+    rv = ap_pass_brigade(f->next, bb);
+    ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, f->c, "h3_filter_out_proto %d %d", rv, f->r->status);
+    
+    // return rv;
+    return OK;
+}
+
+static apr_status_t h3_filter_in_proto(ap_filter_t* f,
+                                     apr_bucket_brigade* bb,
+                                     ap_input_mode_t mode,
+                                     apr_read_type_e block,
+                                     apr_off_t readbytes)
+{
+    apr_status_t rv;
+    if (mode != AP_MODE_READBYTES && mode != AP_MODE_GETLINE) {
+        ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, f->c, "h3_filter_in_proto let's do nothing!");
+        return ap_get_brigade(f->next, bb, mode, block, readbytes);
+    }
+    ap_remove_input_filter(f);
+    if (mode == AP_MODE_READBYTES) {
+        /* we have nothing to read in fact */
+         ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, f->c, "h3_filter_in_proto AP_MODE_READBYTES status %d", f->r->status);
+         if (APR_BRIGADE_EMPTY(bb)) {
+             apr_bucket *eos;
+             eos = apr_bucket_eos_create(f->c->bucket_alloc);
+             APR_BRIGADE_INSERT_TAIL(bb, eos);
+         }
+         // return APR_SUCCESS;
+    }
+    ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, f->c, "h3_filter_in_proto OTHER status %d", f->r->status);
+    rv = ap_pass_brigade(f->next, bb);
+    ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, f->c, "h3_filter_in_proto %d %d %d", rv, mode, AP_MODE_READBYTES);
+    // ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, f->c, "h3_filter_in_proto");
+    return APR_SUCCESS;
 }
 
 static apr_status_t h3_filter_in(ap_filter_t *f,
@@ -163,24 +270,149 @@ static apr_status_t h3_filter_in(ap_filter_t *f,
     }
     return OK;
 }
+struct h3_stuff {
+    apr_pool_t *pchild;
+    server_rec *s;
+};
+
+static void * APR_THREAD_FUNC worker_thread_main(apr_thread_t *thread, void *data)
+{
+    struct h3_stuff *h3 = (struct h3_stuff *)data;
+    apr_pool_t *p = h3->pchild;
+    server_rec *s = h3->s;
+    ap_log_error(APLOG_MARK, APLOG_ERR, 0, s, "worker_thread_main");
+    while (1) {
+        /* Just a "request" every 10 seconds for a first try */
+        conn_rec *c3;
+        apr_pool_t *pool;
+        apr_sockaddr_t *fake_from;
+        apr_sockaddr_t *fake_local;
+        apr_pool_create(&pool, p);
+        apr_sleep(apr_time_from_sec(10));
+        c3 = (conn_rec *) apr_palloc(pool, sizeof(conn_rec));
+        //   c2->master                 = c1;
+        c3->pool                   = pool;
+        c3->base_server            = s;
+        c3->master                 = c3; /* We don't have a master! */
+        c3->conn_config            = ap_create_conn_config(pool);
+        c3->notes                  = apr_table_make(pool, 5);
+        c3->input_filters          = NULL;
+        c3->output_filters         = NULL;
+        c3->keepalives             = 0;
+        c3->filter_conn_ctx        = NULL;
+        c3->bucket_alloc           = apr_bucket_alloc_create(pool);
+        /* prevent mpm_event from making wrong assumptions about this connection,
+         * like e.g. using its socket for an async read check. */
+        c3->clogging_input_filters = 1;
+        c3->log                    = NULL;
+        c3->aborted                = 0;
+        /* We cannot install the master connection socket on the secondary, as
+         * modules mess with timeouts/blocking of the socket, with
+         * unwanted side effects to the master connection processing.
+         * Fortunately, since we never use the secondary socket, we can just install
+         * a single, process-wide dummy and everyone is happy.
+         */
+        ap_set_module_config(c3->conn_config, &core_module, dummy_socket);
+        /* TODO: these should be unique to this thread */
+        // c3->sbh = NULL; /*c1->sbh;*/
+        /* Use a fake local_addr and client_addr for the moment */
+        apr_sockaddr_info_get(&fake_from, "127.0.0.1", APR_INET, 4242, 0, pool);
+        apr_sockaddr_info_get(&fake_local, "127.0.0.1", APR_INET, 4242, 0, pool);
+        c3->local_addr = fake_local;
+        c3->client_addr = fake_from;
+        
+
+        ap_log_cerror(APLOG_MARK, APLOG_TRACE3, 0, c3,
+                      "h3 created");
+
+        /* We need to process the connection we have created */
+        ap_run_process_connection(c3);
+    }
+}
+ 
+static void h3_child_init(apr_pool_t *pchild, server_rec *s)
+{
+    apr_status_t rv;
+    apr_thread_t *worker_thread;
+    struct h3_stuff *h3;
+
+    h3  = apr_palloc(pchild, sizeof(struct h3_stuff));
+    h3->pchild = pchild;
+    h3->s = s;
+    ap_log_error(APLOG_MARK, APLOG_ERR, 0, s, "h3_child_init");
+    rv = apr_socket_create(&dummy_socket, APR_INET, SOCK_STREAM, APR_PROTO_TCP, pchild);
+    if (rv != APR_SUCCESS) {
+        ap_log_error(APLOG_MARK, APLOG_CRIT, rv, s, 
+                     "h3_child_init: Failed to create dummy socket: %d", rv);
+    }
+    rv = ap_thread_create(&worker_thread, NULL, worker_thread_main, (void *)h3, pchild);
+    if (rv != APR_SUCCESS) {
+        ap_log_error(APLOG_MARK, APLOG_CRIT, rv, s, 
+                     "h3_child_init: Failed to create worker thread: %d", rv);
+    }
+       
+}
+static void h3_c1_child_stopping(apr_pool_t *pool, int graceful) {
+    ap_log_error(APLOG_MARK, APLOG_ERR, 0, NULL, "h3_c1_child_stopping %d", graceful);
+}
+static int h3_hook_http_create_request(request_rec *r)
+{
+    ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "h3_hook_http_create_request %d", r->status);
+    if (r->status == 200)
+        abort(); /* prevent sub requests for the moment */
+
+
+    /* Add the filter for the response here */
+    ap_add_output_filter_handle(h3_proto_out_filter_handle, NULL, r, r->connection);
+    ap_add_input_filter_handle(h3_proto_in_filter_handle, NULL, r, r->connection);
+    ap_add_input_filter_handle(h3_net_in_filter_handle, NULL, NULL, r->connection);
+    ap_add_output_filter_handle(h3_net_out_filter_handle, NULL, NULL, r->connection);
+
+    // return DECLINED;
+    return OK;
+}
+static void h3_filter_last(request_rec *r)
+{
+    ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "h3_filter_last");
+    ap_add_output_filter_handle(h3_proto_out_filter_handle, NULL, r, r->connection); /* HACKING */
+}
+static void h3_filter_first(request_rec *r)
+{
+    ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "h3_filter_first");
+    ap_add_input_filter_handle(h3_net_in_filter_handle, NULL, r, r->connection); /* HACKING */
+}
 
 static void register_hooks(apr_pool_t *p)
 {
     ap_hook_post_config(h3_post_config, NULL, NULL, APR_HOOK_MIDDLE);
     ap_hook_pre_connection(h3_hook_pre_connection, NULL, NULL, APR_HOOK_REALLY_FIRST);
     ap_hook_process_connection(h3_hook_process_connection, NULL, NULL, APR_HOOK_REALLY_FIRST);
+    ap_hook_create_request(h3_hook_http_create_request, NULL, NULL, APR_HOOK_REALLY_FIRST);
     ap_hook_pre_read_request(h3_hook_pre_read_request, NULL, NULL, APR_HOOK_MIDDLE);
     ap_hook_post_read_request(h3_hook_post_read_request, NULL, NULL, APR_HOOK_REALLY_FIRST);
-    ap_hook_fixups(h3_hook_fixups, NULL, NULL, APR_HOOK_LAST);
+    // ap_hook_fixups(h3_hook_fixups, NULL, NULL, APR_HOOK_LAST);
     h3_net_out_filter_handle =
         ap_register_output_filter("H3_NET_OUT", h3_filter_out,
                                   NULL, AP_FTYPE_NETWORK);
     h3_net_in_filter_handle =
         ap_register_input_filter("H3_NET_IN", h3_filter_in,
                                   NULL, AP_FTYPE_NETWORK);
+    /* trying it was run too late before */
+    /* ap_hook_insert_filter(h3_filter_first, NULL, NULL, APR_HOOK_FIRST); */
+
     h3_proto_out_filter_handle =
     ap_register_output_filter("H3_NET_OUT_PROTO", h3_filter_out_proto,
                                NULL, AP_FTYPE_PROTOCOL);
+
+    h3_proto_in_filter_handle =
+    ap_register_input_filter("H3_NET_IN_PROTO", h3_filter_in_proto,
+                               NULL, AP_FTYPE_PROTOCOL);
+    /* trying it was run too early before */
+    ap_hook_insert_filter(h3_filter_last, NULL, NULL, APR_HOOK_LAST);
+
+
+    ap_hook_child_init(h3_child_init, NULL, NULL, APR_HOOK_MIDDLE);
+    ap_hook_child_stopping(h3_c1_child_stopping, NULL, NULL, APR_HOOK_MIDDLE);
 #ifdef AP_HAS_RESPONSE_BUCKETS
 #error Not supported for the moment.
 #endif
