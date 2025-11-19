@@ -33,6 +33,10 @@
 
 #include <stdio.h>
 
+#include "ossl-nghttp3.h"
+
+module AP_MODULE_DECLARE_DATA http3_module;
+
 static ap_filter_rec_t *h3_net_out_filter_handle;
 static ap_filter_rec_t *h3_net_in_filter_handle;
 static ap_filter_rec_t *h3_proto_out_filter_handle;
@@ -135,6 +139,13 @@ static apr_status_t h3_filter_out(ap_filter_t* f, apr_bucket_brigade* bb)
             ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, f->c, "h3_filter_out AP_BUCKET_IS_EOC");
         }
         if (APR_BUCKET_IS_FILE(b)) {
+            h3_conn_ctx_t *ctx = (h3_conn_ctx_t*)ap_get_module_config((f->c)->conn_config, &http3_module);
+            if (ctx != NULL) {
+                ctx->otherpart = b->data;
+                abort();
+            } else {
+                ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, f->c, "h3_filter_out APR_BUCKET_IS_FILE NO CTX");
+            }
             ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, f->c, "h3_filter_out APR_BUCKET_IS_FILE");
         }
         if (AP_BUCKET_IS_HEADERS(b)) {
@@ -170,7 +181,7 @@ static apr_status_t h3_filter_out(ap_filter_t* f, apr_bucket_brigade* bb)
 static int print_table_entry(void *rec, const char *key, const char *value)
 {
     const conn_rec *c = (conn_rec *) rec;
-    ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, c, "print_table_entry %s %s", key, value);
+    ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, c, "h3_filter_out_proto print_table_entry %s %s", key, value);
 }
 
 static apr_status_t h3_filter_out_proto(ap_filter_t* f, apr_bucket_brigade* bb)
@@ -198,15 +209,29 @@ static apr_status_t h3_filter_out_proto(ap_filter_t* f, apr_bucket_brigade* bb)
             ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, f->c, "h3_filter_out_proto AP_BUCKET_IS_EOC");
         }
         if (APR_BUCKET_IS_FILE(b)) {
-            ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, f->c, "h3_filter_out_proto APR_BUCKET_IS_FILE");
-            /* we need to read the file and send it */
+            h3_conn_ctx_t *ctx = (h3_conn_ctx_t*)ap_get_module_config((f->c)->conn_config, &http3_module);
+            ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, f->c, "h3_filter_out_proto APR_BUCKET_IS_FILE %d * %d *", ctx, b);
+            ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, f->c, "h3_filter_out_proto APR_BUCKET_IS_FILE %d * %d *", ctx, ctx->otherpart);
+            if (ctx != NULL) {
+                apr_bucket_setaside(b, ctx->p); // Otherwise the file will be closed.
+                ctx->otherpart = b;
+            } else {
+                ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, f->c, "h3_filter_out_proto APR_BUCKET_IS_FILE NO CTX");
+            }
+            /* we will need to read the file and send it */
+            ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, f->c, "h3_filter_out_proto APR_BUCKET_IS_FILE %d * %d *", ctx->otherpart, b);
         }
         if (AP_BUCKET_IS_HEADERS(b)) {
             ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, f->c, "h3_filter_out_proto AP_BUCKET_IS_HEADERS");
         }
         if (AP_BUCKET_IS_RESPONSE(b)) {
             ap_bucket_response *resp = b->data;
+            h3_conn_ctx_t *ctx = (h3_conn_ctx_t*)ap_get_module_config((f->c)->conn_config, &http3_module);
             ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, f->c, "h3_filter_out_proto AP_BUCKET_IS_RESPONSE");
+            if (ctx != NULL)
+                ctx->resp = resp;
+            else
+                ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, f->c, "h3_filter_out_proto AP_BUCKET_IS_RESPONSE NO CTX!!!!");
             ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, f->c, "h3_filter_out_proto %d", resp->status);
             if (resp->reason != NULL) {
                 ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, f->c, "h3_filter_out_proto %s", resp->reason);
@@ -275,61 +300,75 @@ struct h3_stuff {
     server_rec *s;
 };
 
+/* Process a connection / request and fill the ctx structure for the h3 layers */
+apr_status_t process_connection(apr_pool_t *p, server_rec *s, h3_conn_ctx_t *ctx)
+{
+    conn_rec *c3;
+    apr_pool_t *pool;
+    apr_sockaddr_t *fake_from;
+    apr_sockaddr_t *fake_local;
+    apr_pool_create(&pool, p);
+    ctx->p = pool;
+    c3 = (conn_rec *) apr_palloc(pool, sizeof(conn_rec));
+    //   c2->master                 = c1;
+    c3->pool                   = pool;
+    c3->base_server            = s;
+    c3->master                 = c3; /* We don't have a master! */
+    c3->conn_config            = ap_create_conn_config(pool);
+    c3->notes                  = apr_table_make(pool, 5);
+    c3->input_filters          = NULL;
+    c3->output_filters         = NULL;
+    c3->keepalives             = 0;
+    c3->filter_conn_ctx        = NULL;
+    c3->bucket_alloc           = apr_bucket_alloc_create(pool);
+    /* prevent mpm_event from making wrong assumptions about this connection,
+     * like e.g. using its socket for an async read check. */
+    c3->clogging_input_filters = 1;
+    c3->log                    = NULL;
+    c3->aborted                = 0;
+
+    /* We use the ctx to store the response */
+    ap_set_module_config(c3->conn_config, &http3_module, ctx);
+
+    /* We cannot install the master connection socket on the secondary, as
+     * modules mess with timeouts/blocking of the socket, with
+     * unwanted side effects to the master connection processing.
+     * Fortunately, since we never use the secondary socket, we can just install
+     * a single, process-wide dummy and everyone is happy.
+     */
+    // ap_set_module_config(c3->conn_config, &http3_module, dummy_socket);
+    /* TODO: these should be unique to this thread */
+    // c3->sbh = NULL; /*c1->sbh;*/
+    /* Use a fake local_addr and client_addr for the moment */
+    apr_sockaddr_info_get(&fake_from, "127.0.0.1", APR_INET, 4242, 0, pool);
+    apr_sockaddr_info_get(&fake_local, "127.0.0.1", APR_INET, 4242, 0, pool);
+    c3->local_addr = fake_local;
+    c3->client_addr = fake_from;
+
+
+    ap_log_cerror(APLOG_MARK, APLOG_TRACE3, 0, c3,
+                  "h3 created");
+
+    /* We need to process the connection we have created */
+    ap_run_process_connection(c3);
+
+    return APR_SUCCESS;
+}
+
 static void * APR_THREAD_FUNC worker_thread_main(apr_thread_t *thread, void *data)
 {
     struct h3_stuff *h3 = (struct h3_stuff *)data;
     apr_pool_t *p = h3->pchild;
     server_rec *s = h3->s;
+    unsigned long port = 4433;
+    const char *cert_path = "/home/jfclere/CERTS/localhost/newcert.pem";
+    const char *key_path = "/home/jfclere/CERTS/localhost/newkey.txt.pem";
     ap_log_error(APLOG_MARK, APLOG_ERR, 0, s, "worker_thread_main");
-    while (1) {
-        /* Just a "request" every 10 seconds for a first try */
-        conn_rec *c3;
-        apr_pool_t *pool;
-        apr_sockaddr_t *fake_from;
-        apr_sockaddr_t *fake_local;
-        apr_pool_create(&pool, p);
-        apr_sleep(apr_time_from_sec(10));
-        c3 = (conn_rec *) apr_palloc(pool, sizeof(conn_rec));
-        //   c2->master                 = c1;
-        c3->pool                   = pool;
-        c3->base_server            = s;
-        c3->master                 = c3; /* We don't have a master! */
-        c3->conn_config            = ap_create_conn_config(pool);
-        c3->notes                  = apr_table_make(pool, 5);
-        c3->input_filters          = NULL;
-        c3->output_filters         = NULL;
-        c3->keepalives             = 0;
-        c3->filter_conn_ctx        = NULL;
-        c3->bucket_alloc           = apr_bucket_alloc_create(pool);
-        /* prevent mpm_event from making wrong assumptions about this connection,
-         * like e.g. using its socket for an async read check. */
-        c3->clogging_input_filters = 1;
-        c3->log                    = NULL;
-        c3->aborted                = 0;
-        /* We cannot install the master connection socket on the secondary, as
-         * modules mess with timeouts/blocking of the socket, with
-         * unwanted side effects to the master connection processing.
-         * Fortunately, since we never use the secondary socket, we can just install
-         * a single, process-wide dummy and everyone is happy.
-         */
-        ap_set_module_config(c3->conn_config, &core_module, dummy_socket);
-        /* TODO: these should be unique to this thread */
-        // c3->sbh = NULL; /*c1->sbh;*/
-        /* Use a fake local_addr and client_addr for the moment */
-        apr_sockaddr_info_get(&fake_from, "127.0.0.1", APR_INET, 4242, 0, pool);
-        apr_sockaddr_info_get(&fake_local, "127.0.0.1", APR_INET, 4242, 0, pool);
-        c3->local_addr = fake_local;
-        c3->client_addr = fake_from;
-        
-
-        ap_log_cerror(APLOG_MARK, APLOG_TRACE3, 0, c3,
-                      "h3 created");
-
-        /* We need to process the connection we have created */
-        ap_run_process_connection(c3);
-    }
+    server(p, s, port, cert_path, key_path);
+    ap_log_error(APLOG_MARK, APLOG_ERR, 0, s, "worker_thread_main exited!");
 }
- 
+
+/* The child creates a thread that waits on the udp socket and create another thread to process a request */ 
 static void h3_child_init(apr_pool_t *pchild, server_rec *s)
 {
     apr_status_t rv;

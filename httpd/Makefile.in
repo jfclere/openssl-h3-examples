@@ -1,18 +1,20 @@
 APACHE_BASE = @APACHE_BASE@
+NGHTTP3_BASE = @NGHTTP3_BASE@
+OPENSSL_BASE = @OPENSSL_BASE@
 top_builddir = @APACHE_BUILDDIR@
 # For .deps.
 builddir = @CLUSTER_BASE@
 
 include $(top_builddir)/build/rules.mk
-SH_COMPILE = $(LIBTOOL) --mode=compile $(BASE_CC) -I../include -prefer-pic -c $< && touch $@
+SH_COMPILE = $(LIBTOOL) --mode=compile $(BASE_CC) -I${APACHE_BASE}/include -I${NGHTTP3_BASE}/include -I${OPENSSL_BASE}/include -prefer-pic -c $< && touch $@
 
 all: mod_h3.so
 
 mod_h3.so: mod_h3.la
 	$(top_builddir)/build/instdso.sh SH_LIBTOOL='$(LIBTOOL)' mod_h3.la `pwd`
 
-mod_h3.la: mod_h3.slo
-	$(SH_LINK) -rpath $(libexecdir) -module -avoid-version mod_h3.lo
+mod_h3.la: mod_h3.slo ossl-nghttp3.slo
+	$(SH_LINK) -rpath $(libexecdir) -module -avoid-version mod_h3.lo ossl-nghttp3.lo -L${OPENSSL_BASE}/lib64/ -L${NGHTTP3_BASE}/lib -lnghttp3 -lcrypto -lssl
 
 clean:
 	rm -f *.o *.lo *.slo *.so

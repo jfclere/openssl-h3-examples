@@ -19,17 +19,58 @@ AC_ARG_WITH(apxs,
     fi
         AC_MSG_RESULT([apxs_support is ${apxs_support}])
     if test "${apxs_support}" = "false" ; then
-        AC_MSG_ERROR(mod_kubernetes module need a valid apxs)
+        AC_MSG_ERROR(mod_h3 module need a valid apxs)
     fi
     APACHE_BASE=`$APXS -q PREFIX`
     APACHE_BUILDDIR=`$APXS -q installbuilddir`
     APACHE_BUILDDIR=`(cd $APACHE_BUILDDIR/..; pwd)`
 ],
 [   AC_MSG_ERROR(Please use --with-apxs[=FILE])])
+
+AC_MSG_CHECKING(for openssl installation)
+AC_ARG_WITH(openssl,
+[  --with-openssl[=DIR]     Build using openssl in DIR
+],
+[   openssl_support=true
+    if test "$withval" != "no"; then
+        OPENSSL_BASE=$withval
+        AC_MSG_RESULT([OPENSSL_BASE is ${OPENSSL_BASE}])
+        test -d ${OPENSSL_BASE} || openssl_support=false
+    else
+        openssl_support=false
+    fi
+        AC_MSG_RESULT([openssl_support is ${openssl_support}])
+    if test "${openssl_support}" = "false" ; then
+        AC_MSG_ERROR(mod_h3 module need a valid openssl installation)
+    fi
+],
+[   AC_MSG_ERROR(Please use --with-openssl[=DIR])])
+
+AC_MSG_CHECKING(for nghttp3 installation)
+AC_ARG_WITH(nghttp3,
+[  --with-nghttp3[=DIR]     Build using nghttp3 in DIR
+],
+[   nghttp3_support=true
+    if test "$withval" != "no"; then
+        NGHTTP3_BASE=$withval
+        AC_MSG_RESULT([NGHTTP3_BASE is ${NGHTTP3_BASE}])
+        test -d ${NGHTTP3_BASE} || nghttp3_support=false
+    else
+        nghttp3_support=false
+    fi
+        AC_MSG_RESULT([nghttp3_support is ${nghttp3_support}])
+    if test "${nghttp3_support}" = "false" ; then
+        AC_MSG_ERROR(mod_h3 module need a valid nghttp3 installation)
+    fi
+],
+[   AC_MSG_ERROR(Please use --with-nghttp3[=DIR])])
+
 CLUSTER_BASE=`pwd`
 
 AC_SUBST(APACHE_BASE)
 AC_SUBST(CLUSTER_BASE)
 AC_SUBST(APACHE_BUILDDIR)
+AC_SUBST(OPENSSL_BASE)
+AC_SUBST(NGHTTP3_BASE)
 AC_CONFIG_FILES([Makefile])
 AC_OUTPUT
