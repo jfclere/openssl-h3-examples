@@ -54,5 +54,9 @@ typedef struct h3_nvs_t h3_nvs_t;
 
 /* run a h3 server logic using openssl calls */
 int server(apr_pool_t *p, server_rec *s, unsigned long port, const char *cert_path, const char *key_path);
+/* create an internal connection for Apache httpd */
+conn_rec *create_connection(apr_pool_t *p, server_rec *s, h3_conn_ctx_t *ctx);
+/* process an internal connection */
+apr_status_t process_connection(apr_pool_t *p, server_rec *s, conn_rec *c);
 /* process a request, using a internal connection */
-apr_status_t process_connection(apr_pool_t *p, server_rec *s, h3_conn_ctx_t *ctx);
+apr_status_t process_request(request_rec *r);

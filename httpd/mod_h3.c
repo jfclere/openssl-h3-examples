@@ -58,37 +58,9 @@ static int h3_post_config(apr_pool_t *p, apr_pool_t *plog, apr_pool_t *ptemp, se
     return OK;
 }
 
+/* WE DON'T NEED THAT ONE */
 static int h3_hook_process_connection(conn_rec* c)
 {
-    request_rec *r = NULL;
-    
-    ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, c, "h3_hook_process_connection");
-    r = ap_create_request(c);
-    ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, c, "h3_hook_process_connection after ap_create_request()");
-
-    /* populate r with the data we have. */
-    r->uri             = "/index.html"; /* "/" Will create a sub-request switch will cause us troubles for the moment */
-    r->method = "GET";
-    r->method_number = M_GET;
-    r->header_only = 1;
-    r->protocol = "HTTP/1.1";
-    r->proto_num = HTTP_VERSION(1, 1);
-    r->hostname = NULL;
-
-    /* some headers to try */
-    apr_table_setn(r->headers_in, "Host", "localhost"); 
-    apr_table_setn(r->headers_in, "User-Agent", "curl/8.11.1"); 
-    apr_table_setn(r->headers_in, "Accept", "*/*"); 
-
-    /* Add the filter for the response here */
-    // ap_add_output_filter_handle(h3_proto_out_filter_handle, NULL, r, r->connection);
-    // ap_add_input_filter_handle(h3_proto_in_filter_handle, NULL, r, r->connection);
-    // ap_add_input_filter_handle(h3_net_in_filter_handle, NULL, NULL, c);
-    // ap_add_output_filter_handle(h3_net_out_filter_handle, NULL, NULL, c);
-
-    ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, c, "h3_hook_process_connection before ap_process_request()");
-    ap_process_request(r);
-    ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, c, "h3_hook_process_connection after ap_process_request()");
     return OK;
 }
 
@@ -291,6 +263,12 @@ static apr_status_t h3_filter_in(ap_filter_t *f,
     ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, f->c, "h3_filter_in mode %d", mode);
     if (mode == AP_MODE_READBYTES) {
         ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, f->c, "h3_filter_in AP_MODE_READBYTES");
+        if (f->ctx == NULL) {
+            apr_bucket *e = apr_bucket_eos_create(f->c->bucket_alloc);
+            APR_BRIGADE_INSERT_TAIL(bb, e);
+            f->ctx = (void *)1;
+            return APR_EOF;
+        }
         ap_remove_input_filter(f);
     }
     return OK;
@@ -300,8 +278,8 @@ struct h3_stuff {
     server_rec *s;
 };
 
-/* Process a connection / request and fill the ctx structure for the h3 layers */
-apr_status_t process_connection(apr_pool_t *p, server_rec *s, h3_conn_ctx_t *ctx)
+/* Create a connection */
+conn_rec *create_connection(apr_pool_t *p, server_rec *s, h3_conn_ctx_t *ctx)
 {
     conn_rec *c3;
     apr_pool_t *pool;
@@ -347,12 +325,28 @@ apr_status_t process_connection(apr_pool_t *p, server_rec *s, h3_conn_ctx_t *ctx
 
 
     ap_log_cerror(APLOG_MARK, APLOG_TRACE3, 0, c3,
-                  "h3 created");
+                  "c3 created");
+    return c3;
+}
+
+/* Process a connection */
+/* the create_connection has been called in ossl-nghttp3.c */
+apr_status_t process_connection(apr_pool_t *p, server_rec *s, conn_rec *c)
+{
 
     /* We need to process the connection we have created */
-    ap_run_process_connection(c3);
+    ap_run_process_connection(c);
 
     return APR_SUCCESS;
+}
+/* Process a request */
+/* the request has been created in ossl-nghttp3.c */
+apr_status_t process_request(request_rec *r)
+{
+    ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "process_request before ap_process_request()");
+    ap_process_request(r);
+    ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "process_request after ap_process_request()");
+    return OK;
 }
 
 static void * APR_THREAD_FUNC worker_thread_main(apr_thread_t *thread, void *data)

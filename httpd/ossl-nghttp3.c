@@ -22,6 +22,9 @@
 #ifndef PATH_MAX
 # define PATH_MAX 255
 #endif
+#ifndef MAXHEADER
+# define MAXHEADER 255
+#endif
 
 #define nghttp3_arraylen(A) (sizeof(A) / sizeof(*(A)))
 
@@ -62,12 +65,14 @@ struct h3ssl {
     int received_from_two;    /* workaround for -607 on nghttp3_conn_read_stream on stream 2 */
     int restart;              /* new request/response cycle started */
     uint64_t id_bidi;         /* the id of the stream used to read request and send response */
-    char *fileprefix;         /* prefix of the directory to fetch files from */
-    char url[MAXURL];         /* url to serve the request */
     uint8_t *ptr_data;        /* pointer to the data to send */
     size_t ldata;             /* amount of bytes to send */
     int offset_data;          /* offset to next data to send */
-    server_rec *s;             /* server for log and other stuff */
+    server_rec *s;            /* server for log and other stuff */
+    conn_rec *c;              /* connect to Apache HTTPD */
+    apr_pool_t *p;            /* pool from the pchild */
+    request_rec *r;           /* request to Apache HTTPD */
+    h3_conn_ctx_t *h3ctx;     /* pointer to request/response we are processing */ 
 };
 
 /* Note the name MUST be ap_str_tolower(name); before */
@@ -84,7 +89,6 @@ static void init_ids(struct h3ssl *h3ssl)
 {
     struct ssl_id *ssl_ids;
     int i;
-    char *prior_fileprefix = h3ssl->fileprefix;
 
     memset(h3ssl, 0, sizeof(struct h3ssl));
 
@@ -92,9 +96,6 @@ static void init_ids(struct h3ssl *h3ssl)
     for (i = 0; i < MAXSSL_IDS; i++)
         ssl_ids[i].id = UINT64_MAX;
     h3ssl->id_bidi = UINT64_MAX;
-
-    /* restore the fileprefix */
-    h3ssl->fileprefix = prior_fileprefix;
 }
 
 static void reuse_h3ssl(struct h3ssl *h3ssl)
@@ -104,7 +105,6 @@ static void reuse_h3ssl(struct h3ssl *h3ssl)
     h3ssl->close_done = 0;
     h3ssl->close_wait = 0;
     h3ssl->done = 0;
-    memset(h3ssl->url, '\0', sizeof(h3ssl->url));
     h3ssl->ptr_data = NULL;
     h3ssl->offset_data = 0;
     h3ssl->ldata = 0;
@@ -274,32 +274,66 @@ static int on_recv_header(nghttp3_conn *conn, int64_t stream_id, int32_t token,
 {
     nghttp3_vec vname, vvalue;
     struct h3ssl *h3ssl = (struct h3ssl *)user_data;
+    request_rec *r = h3ssl->r;
+
+    if (r == NULL) {
+        ap_log_error(APLOG_MARK, APLOG_ERR, 0, h3ssl->s, "on_recv_header, create request");
+        r = ap_create_request(h3ssl->c);
+        h3ssl->r = r;
+    } else {
+        ap_log_error(APLOG_MARK, APLOG_ERR, 0, h3ssl->s, "on_recv_header, add header to request");
+    }
+    vname = nghttp3_rcbuf_get_buf(name);
+    vvalue = nghttp3_rcbuf_get_buf(value);
+
+    /* Process uri */
+    if (token == NGHTTP3_QPACK_TOKEN__PATH) {
+        /* :path */
+        int len = (((vvalue.len+1) < (MAXURL)) ? (vvalue.len+1) : (MAXURL));
+        r->uri = apr_palloc(r->pool, len); 
+        memcpy(r->uri, vvalue.base, len - 1);
+        return 0;
+    }
+
+    /* Process scheme */
+    if (token == NGHTTP3_QPACK_TOKEN__SCHEME) {
+        /* :scheme */
+        int len = (((vvalue.len+1) < (MAXURL)) ? (vvalue.len+1) : (MAXURL));
+        char *scheme = apr_palloc(r->pool, len); 
+        memcpy(scheme, vvalue.base, len - 1);
+        apr_table_setn(r->headers_in, "Scheme", scheme);
+        return 0;
+    }
+
+    /* Process method */
+    if (token == NGHTTP3_QPACK_TOKEN__METHOD) {
+        /* :method */
+        int len = (((vvalue.len+1) < (MAXURL)) ? (vvalue.len+1) : (MAXURL));
+        r->method = apr_palloc(r->pool, len); 
+        memcpy((char *) r->method, vvalue.base + 1, len - 1);
+        return 0;
+    }
+
+    /* Process authority */
+    if (token == NGHTTP3_QPACK_TOKEN__AUTHORITY) {
+        /* :authority = Host */
+        int len = (((vvalue.len+1) < (MAXURL)) ? (vvalue.len+1) : (MAXURL));
+        char *host = apr_palloc(r->pool, len);
+        memcpy(host, vvalue.base, len - 1);
+        apr_table_setn(r->headers_in, "Host", host);
+        return 0;
+    }
 
     /* Received a single HTTP header. */
     vname = nghttp3_rcbuf_get_buf(name);
     vvalue = nghttp3_rcbuf_get_buf(value);
-
-    fwrite(vname.base, vname.len, 1, stdout);
-    fprintf(stdout, ": ");
-    fwrite(vvalue.base, vvalue.len, 1, stdout);
-    fprintf(stdout, "\n");
-
-    if (token == NGHTTP3_QPACK_TOKEN__PATH) {
-        int len = (((vvalue.len) < (MAXURL)) ? (vvalue.len) : (MAXURL));
-
-        memset(h3ssl->url, 0, sizeof(h3ssl->url));
-        if (vvalue.base[0] == '/') {
-            if (vvalue.base[1] == '\0') {
-                strncpy(h3ssl->url, "index.html", MAXURL);
-            } else {
-                memcpy(h3ssl->url, vvalue.base + 1, len - 1);
-                h3ssl->url[len - 1] = '\0';
-            }
-        } else {
-            memcpy(h3ssl->url, vvalue.base, len);
-        }
-    }
-
+    int ln = (((vname.len+1) < (MAXHEADER)) ? (vname.len+1) : (MAXHEADER));
+    int lv = (((vvalue.len+1) < (MAXHEADER)) ? (vvalue.len+1) : (MAXHEADER));
+    char *sname = apr_palloc(r->pool, ln);
+    memcpy(sname, vname.base, ln - 1);
+    char *svalue = apr_palloc(r->pool, lv);
+    memcpy(svalue, vvalue.base, lv - 1);
+    apr_table_setn(r->headers_in, sname, svalue);
     return 0;
 }
 
@@ -308,7 +342,7 @@ static int on_end_headers(nghttp3_conn *conn, int64_t stream_id, int fin,
 {
     struct h3ssl *h3ssl = (struct h3ssl *)user_data;
 
-    fprintf(stderr, "on_end_headers!\n");
+    ap_log_error(APLOG_MARK, APLOG_ERR, 0, h3ssl->s, "on_end_headers!");
     h3ssl->end_headers_received = 1;
     return 0;
 }
@@ -547,6 +581,13 @@ static int read_from_ssl_ids(nghttp3_conn **curh3conn, struct h3ssl *h3ssl)
             /* create the new h3conn */
             nghttp3_conn_del(*curh3conn);
             nghttp3_settings_default(&settings);
+            /* create the connection for httpd here too */
+            h3_conn_ctx_t *h3ctx = apr_palloc(h3ssl->p, sizeof(h3ctx));
+            h3ctx->s =  h3ssl->s;
+            h3ssl->h3ctx = h3ctx; /* we need it to store the request */
+            /* the h3ctx->p is create and set in create_connection() */
+            h3ssl->c = create_connection(h3ssl->p, h3ssl->s, h3ctx);
+
             if (nghttp3_conn_server_new(curh3conn, &callbacks, &settings, mem,
                                         h3ssl)) {
                 ap_log_error(APLOG_MARK, APLOG_ERR, 0, h3ssl->s, "nghttp3_conn_client_new failed!");
@@ -758,59 +799,6 @@ static void handle_events_from_ids(struct h3ssl *h3ssl)
     }
 }
 
-static size_t get_file_length(struct h3ssl *h3ssl)
-{
-    char filename[PATH_MAX];
-    struct stat st;
-
-    memset(filename, 0, PATH_MAX);
-    if (h3ssl->fileprefix != NULL)
-        strcat(filename, h3ssl->fileprefix);
-    strcat(filename, h3ssl->url);
-
-    if (strcmp(h3ssl->url, "big") == 0) {
-        printf("big!!!\n");
-        return (size_t)INT_MAX;
-    }
-    if (stat(filename, &st) == 0) {
-        /* Only process regular files */
-        if (S_ISREG(st.st_mode)) {
-            printf("get_file_length %s %lld\n", filename, (unsigned long long) st.st_size);
-            return (size_t)st.st_size;
-        }
-    }
-    printf("Can't get_file_length %s\n", filename);
-    return 0;
-}
-
-static char *get_file_data(struct h3ssl *h3ssl)
-{
-    char filename[PATH_MAX];
-    size_t size = get_file_length(h3ssl);
-    char *res;
-    int fd;
-
-    if (size == 0)
-        return NULL;
-
-    memset(filename, 0, PATH_MAX);
-    if (h3ssl->fileprefix != NULL)
-        strcat(filename, h3ssl->fileprefix);
-    strcat(filename, h3ssl->url);
-
-    res = malloc(size+1);
-    res[size] = '\0';
-    fd = open(filename, O_RDONLY);
-    if (read(fd, res, size) == -1) {
-        close(fd);
-        free(res);
-        return NULL;
-    }
-    close(fd);
-    printf("read from %s : %zu\n", filename, size);
-    return res;
-}
-
 static nghttp3_ssize step_read_data(nghttp3_conn *conn, int64_t stream_id,
                                     nghttp3_vec *vec, size_t veccnt,
                                     uint32_t *pflags, void *user_data,
@@ -823,7 +811,7 @@ static nghttp3_ssize step_read_data(nghttp3_conn *conn, int64_t stream_id,
         return 0;
     }
     /* send the data */
-    printf("step_read_data for %s %zu\n", h3ssl->url, h3ssl->ldata);
+    printf("step_read_data for %zu\n", h3ssl->ldata);
     if (h3ssl->ldata <= 4096) {
         vec[0].base = &(h3ssl->ptr_data[h3ssl->offset_data]);
         vec[0].len = h3ssl->ldata;
@@ -1071,25 +1059,20 @@ static void build_nv_from_response(nghttp3_nv *resp, size_t *num_nv, int max_nv,
     h3_nvs.p = h3ctx->p;
 
     /* set response->status */
-    ap_log_error(APLOG_MARK, APLOG_ERR, 0, h3ctx->s, "run_quic_server has in build_nv_from_response APR_BUCKET_IS_FILE %d %d", h3ctx, h3ctx->otherpart);
     stringstatus = apr_psprintf(h3ctx->p, "%d", response->status);
-    ap_log_error(APLOG_MARK, APLOG_ERR, 0, h3ctx->s, "run_quic_server has more (0) build_nv_from_response APR_BUCKET_IS_FILE %d %d", h3ctx, h3ctx->otherpart);
     make_nv(&resp[cur_nv++], ":status", stringstatus);
-    ap_log_error(APLOG_MARK, APLOG_ERR, 0, h3ctx->s, "run_quic_server has more (1) build_nv_from_response APR_BUCKET_IS_FILE %d %d", h3ctx, h3ctx->otherpart);
     ap_log_error(APLOG_MARK, APLOG_ERR, 0, h3ctx->s, "build_nv_from_response status %s", stringstatus);
 
     /* set response->reason */
     if (response->reason != NULL) {
         ap_log_error(APLOG_MARK, APLOG_ERR, 0, h3ctx->s, "build_nv_from_response reason %s", response->reason);
     }
-    ap_log_error(APLOG_MARK, APLOG_ERR, 0, h3ctx->s, "run_quic_server has more build_nv_from_response APR_BUCKET_IS_FILE %d %d", h3ctx, h3ctx->otherpart);
 
     h3_nvs.cur_nv = cur_nv;
     if (response->headers != NULL) {
         apr_table_do(add_header_entry, (void *) &h3_nvs, response->headers, NULL);
     }
     *num_nv = h3_nvs.cur_nv;
-    ap_log_error(APLOG_MARK, APLOG_ERR, 0, h3ctx->s, "run_quic_server has done build_nv_from_response APR_BUCKET_IS_FILE %d %d", h3ctx, h3ctx->otherpart);
 }
 /* Main loop for server to accept QUIC connections. */
 static int run_quic_server(apr_pool_t *p, server_rec *s, SSL_CTX *ctx, int fd)
@@ -1100,7 +1083,6 @@ static int run_quic_server(apr_pool_t *p, server_rec *s, SSL_CTX *ctx, int fd)
     nghttp3_conn *h3conn = NULL;
     struct h3ssl h3ssl;
     SSL *ssl;
-    char *fileprefix = getenv("FILEPREFIX");
 
     /* Create a new QUIC listener. */
     ap_log_error(APLOG_MARK, APLOG_ERR, 0, s, "run_quic_server started!");
@@ -1132,7 +1114,6 @@ static int run_quic_server(apr_pool_t *p, server_rec *s, SSL_CTX *ctx, int fd)
     /* mem default */
     mem = nghttp3_mem_default();
     memset(&h3ssl, 0, sizeof(h3ssl));
-    h3ssl.s = s;
     for (;;) {
         nghttp3_nv resp[10];
         size_t num_nv;
@@ -1144,7 +1125,8 @@ static int run_quic_server(apr_pool_t *p, server_rec *s, SSL_CTX *ctx, int fd)
         h3_conn_ctx_t *h3ctx;
 
         init_ids(&h3ssl);
-        h3ssl.fileprefix = fileprefix;
+        h3ssl.s = s;
+        h3ssl.p = p;
         printf("listener: %p\n", (void *)listener);
         add_ids_listener(listener, &h3ssl);
 
@@ -1215,14 +1197,17 @@ static int run_quic_server(apr_pool_t *p, server_rec *s, SSL_CTX *ctx, int fd)
         /* we have receive the request build the response and send it */
         /* XXX add  MAKE_NV("connection", "close"), to resp[] and recheck */
         ap_log_error(APLOG_MARK, APLOG_ERR, 0, s, "run_quic_server processing request!");
-        h3ctx = apr_palloc(p, sizeof(h3ctx));
-        h3ctx->s = s;
-        // Use the connection pool see process_connection() h3ctx->p = p;
-        if (process_connection(p, s, h3ctx) != APR_SUCCESS) {
+        if (process_connection(p, s, h3ssl.c) != APR_SUCCESS) {
+            /* Probably we should return a bad request or something the like */
+            ap_log_error(APLOG_MARK, APLOG_ERR, 0, s, "run_quic_server processing connection FAILED!");
+            goto err;
+        }
+        if (process_request(h3ssl.r) != APR_SUCCESS) {
             /* Probably we should return a bad request or something the like */
             ap_log_error(APLOG_MARK, APLOG_ERR, 0, s, "run_quic_server processing request FAILED!");
             goto err;
         }
+        h3ctx = h3ssl.h3ctx;
         if (h3ctx->resp == NULL) {
             /* Probably we should return a bad request or something the like */
             ap_log_error(APLOG_MARK, APLOG_ERR, 0, s, "run_quic_server no response!");
