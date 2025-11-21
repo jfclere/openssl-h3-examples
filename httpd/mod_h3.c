@@ -391,8 +391,9 @@ static void h3_c1_child_stopping(apr_pool_t *pool, int graceful) {
 static int h3_hook_http_create_request(request_rec *r)
 {
     ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "h3_hook_http_create_request %d", r->status);
-    if (r->status == 200)
-        abort(); /* prevent sub requests for the moment */
+    if (r->main != NULL) {
+        return DECLINED;
+    }
 
 
     /* Add the filter for the response here */
