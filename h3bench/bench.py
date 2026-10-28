@@ -141,7 +141,7 @@ async def conn_task(args, st, stop, window, i):
 
 def read_ticks(pid, tid=None):
     p = "self" if pid is None else pid
-    if not tid:
+    if not tid or tid == "0":
         path = f"/proc/{p}/stat"
         with open(path) as f:
             fields = f.read().rsplit(") ", 1)[1].split()
@@ -154,6 +154,29 @@ def read_ticks(pid, tid=None):
         with open(f"/proc/{p}/task/{one}/stat") as f:
             fields = f.read().rsplit(") ", 1)[1].split()
         total += int(fields[11]) + int(fields[12])
+    return total
+
+
+def read_ticks_tree(pid):
+    """Read utime+stime for pid and all its children via /proc/*/stat."""
+    import os
+    total = read_ticks(pid)
+    try:
+        children_data = open(f"/proc/{pid}/task/{pid}/children").read().split()
+    except FileNotFoundError:
+        for entry in os.listdir("/proc"):
+            if not entry.isdigit():
+                continue
+            try:
+                with open(f"/proc/{entry}/stat") as f:
+                    fields = f.read().rsplit(") ", 1)[1].split()
+                if int(fields[1]) == int(pid):  # ppid
+                    total += int(fields[11]) + int(fields[12])
+            except (FileNotFoundError, ProcessLookupError, IndexError):
+                continue
+        return total
+    for cpid in children_data:
+        total += read_ticks(int(cpid))
     return total
 
 
@@ -171,7 +194,7 @@ async def run(args):
     snap0 = {}
     if args.server_pid:
         snap0 = {"poller": read_ticks(args.server_pid, args.poller_tid),
-                 "jvm": read_ticks(args.server_pid),
+                 "server": read_ticks_tree(args.server_pid),
                  "client": read_ticks(None)}
     t0 = time.perf_counter()
     window[0] = t0
@@ -179,7 +202,7 @@ async def run(args):
     el = time.perf_counter() - t0
     if args.server_pid:
         snap1 = {"poller": read_ticks(args.server_pid, args.poller_tid),
-                 "jvm": read_ticks(args.server_pid),
+                 "server": read_ticks_tree(args.server_pid),
                  "client": read_ticks(None)}
         cpu = {k: (snap1[k] - snap0[k]) * 100.0 / 100 / el
                for k in snap1}
