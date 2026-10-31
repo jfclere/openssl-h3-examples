@@ -28,6 +28,7 @@ Originally written for Apache Tomcat's QUIC endpoints, adapted here for Apache h
 | `run_case.sh` | Same as run_httpd.sh but for Tomcat (finds JVM PID and poller thread). |
 | `matrix.sh` | Full test matrix for Tomcat. |
 | `h3test.html` | 70-byte static file to serve as the benchmark target. |
+| `h3q_cid_dump.c` | Dumps the eBPF CID routing map used by mod_http3 SO_REUSEPORT. |
 
 ## Quick start (httpd)
 
@@ -79,6 +80,24 @@ python3 bench.py [options]
 - `duration` — measurement window in seconds
 
 The script auto-detects the httpd parent PID and the QUIC UDP port.
+
+## h3q_cid_dump — eBPF CID map inspector
+
+Reads the pinned BPF SOCKHASH map (`/sys/fs/bpf/h3q_cid_map`) that mod_http3
+uses for SO_REUSEPORT CID-based routing and prints every registered connection ID.
+
+```bash
+cc -Wall -o h3q_cid_dump h3q_cid_dump.c
+sudo ./h3q_cid_dump
+```
+
+Output includes:
+- **Map info** — type, key/value sizes, max entries (65536)
+- **Program info** — run count and total run time (packets processed by the eBPF)
+- **CID list** — every registered CID in hex, with a total count and usage percentage
+
+Useful for diagnosing CID map leaks (CIDs are registered during handshakes but
+currently never unregistered when connections close).
 
 ## Test matrix
 
