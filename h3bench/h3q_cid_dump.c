@@ -1,8 +1,8 @@
 /*
  * h3q_cid_dump - dump the h3q_cid_map eBPF SOCKHASH map
  *
- * Iterates over all CID entries registered by mod_http3 in the pinned
- * BPF map at /sys/fs/bpf/h3q_cid_map and prints each CID (hex).
+ * Iterates over all prefix entries registered by mod_http3 in the pinned
+ * BPF map at /sys/fs/bpf/h3q_cid_map and prints each 4-byte CID prefix.
  *
  * Build:  cc -o h3q_cid_dump h3q_cid_dump.c
  * Run:    sudo ./h3q_cid_dump
@@ -50,12 +50,12 @@ static int map_get_info(int map_fd, struct bpf_map_info *info)
     return sys_bpf(BPF_OBJ_GET_INFO_BY_FD, &attr, sizeof(attr));
 }
 
-static void hex8(char *out, const unsigned char *data)
+static void hex4(char *out, const unsigned char *data)
 {
     int i;
-    for (i = 0; i < 8; i++)
+    for (i = 0; i < 4; i++)
         sprintf(out + i * 2, "%02x", data[i]);
-    out[16] = '\0';
+    out[8] = '\0';
 }
 
 int main(int argc, char **argv)
@@ -63,11 +63,11 @@ int main(int argc, char **argv)
     const char *map_path = "/sys/fs/bpf/h3q_cid_map";
     const char *prog_path = "/sys/fs/bpf/h3q_reuseport";
     int map_fd, prog_fd;
-    uint64_t key, next_key;
+    uint32_t key, next_key;
     int count = 0;
     struct bpf_map_info minfo;
     struct bpf_prog_info pinfo;
-    char cid_hex[17];
+    char prefix_hex[9];
 
     if (argc > 1)
         map_path = argv[1];
@@ -95,13 +95,13 @@ int main(int argc, char **argv)
     /* prog info */
     prog_fd = open_pinned(prog_path);
     if (prog_fd >= 0) {
+        union bpf_attr pattr;
         memset(&pinfo, 0, sizeof(pinfo));
-        union bpf_attr attr;
-        memset(&attr, 0, sizeof(attr));
-        attr.info.bpf_fd  = (uint32_t)prog_fd;
-        attr.info.info_len = sizeof(pinfo);
-        attr.info.info     = (uint64_t)(unsigned long)&pinfo;
-        if (sys_bpf(BPF_OBJ_GET_INFO_BY_FD, &attr, sizeof(attr)) == 0) {
+        memset(&pattr, 0, sizeof(pattr));
+        pattr.info.bpf_fd  = (uint32_t)prog_fd;
+        pattr.info.info_len = sizeof(pinfo);
+        pattr.info.info     = (uint64_t)(unsigned long)&pinfo;
+        if (sys_bpf(BPF_OBJ_GET_INFO_BY_FD, &pattr, sizeof(pattr)) == 0) {
             printf("prog: %s\n", pinfo.name[0] ? pinfo.name : "(unnamed)");
             printf("  type:        %u (SK_REUSEPORT=%d)\n", pinfo.type, BPF_PROG_TYPE_SK_REUSEPORT);
             printf("  id:          %u\n", pinfo.id);
@@ -112,8 +112,8 @@ int main(int argc, char **argv)
         close(prog_fd);
     }
 
-    /* iterate all CID keys */
-    printf("CID entries:\n");
+    /* iterate all prefix keys */
+    printf("Prefix entries:\n");
     memset(&key, 0, sizeof(key));
     if (map_get_next_key(map_fd, NULL, &next_key) != 0) {
         printf("  (empty)\n");
@@ -123,8 +123,8 @@ int main(int argc, char **argv)
 
     key = next_key;
     do {
-        hex8(cid_hex, (const unsigned char *)&key);
-        printf("  [%5d] CID: %s\n", count, cid_hex);
+        hex4(prefix_hex, (const unsigned char *)&key);
+        printf("  [%5d] prefix: %s\n", count, prefix_hex);
         count++;
     } while (map_get_next_key(map_fd, &key, &next_key) == 0 && (key = next_key, 1));
 
